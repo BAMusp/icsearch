@@ -1,4 +1,9 @@
-from rest_framework import viewsets
+from django.contrib.auth.models import update_last_login
+from rest_framework import status, viewsets
+from rest_framework.authtoken.models import Token
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from .models import (
     AgenciaFomento, Curso, Departamento, GrandeArea, Laboratorio,
@@ -6,8 +11,10 @@ from .models import (
 )
 from .permissions import LeituraLivreEscritaAdmin
 from .serializers import (
-    AgenciaFomentoSerializer, CursoSerializer, DepartamentoSerializer,
-    GrandeAreaSerializer, LaboratorioSerializer, TipoOportunidadeSerializer,
+    AgenciaFomentoSerializer, CadastroAlunoSerializer, CadastroDocenteSerializer,
+    CursoSerializer, DepartamentoSerializer, GrandeAreaSerializer,
+    LaboratorioSerializer, LoginSerializer, TipoOportunidadeSerializer,
+    UsuarioSerializer,
 )
 
 
@@ -17,7 +24,7 @@ class TabelaAuxiliarViewSet(viewsets.ModelViewSet):
     pagination_class = None
 
     def get_queryset(self):
-        queryset = self.queryset
+        queryset = super().get_queryset()
         if not self.request.user.is_staff:
             queryset = queryset.filter(ativo=True)
         return queryset
@@ -59,4 +66,56 @@ class LaboratorioViewSet(TabelaAuxiliarViewSet):
             queryset = queryset.filter(departamento_id=departamento)
         return queryset
 
-# Create your views here.
+
+def resposta_com_token(usuario, status_http=status.HTTP_200_OK):
+    token, _ = Token.objects.get_or_create(user=usuario)
+    return Response(
+        {"token": token.key, "usuario": UsuarioSerializer(usuario).data},
+        status=status_http,
+    )
+
+
+class CadastroAlunoView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = CadastroAlunoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        aluno = serializer.save()
+        return resposta_com_token(aluno.usuario, status.HTTP_201_CREATED)
+
+
+class CadastroDocenteView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = CadastroDocenteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        docente = serializer.save()
+        return resposta_com_token(docente.usuario, status.HTTP_201_CREATED)
+
+
+class LoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        usuario = serializer.validated_data["usuario"]
+        update_last_login(None, usuario)
+        return resposta_com_token(usuario)
+
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        Token.objects.filter(user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EuView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(UsuarioSerializer(request.user).data)

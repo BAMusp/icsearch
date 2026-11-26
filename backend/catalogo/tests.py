@@ -171,7 +171,7 @@ class ApiTabelasAuxiliaresTeste(BaseTeste):
 
     def test_so_admin_cria(self):
         resposta = self.client.post("/api/cursos/", {"nome": "Engenharia Civil"})
-        self.assertEqual(resposta.status_code, 403)
+        self.assertEqual(resposta.status_code, 401)
         aluno = self.criar_aluno("a1@usp.br", "1")
         self.client.force_login(aluno.usuario)
         resposta = self.client.post("/api/cursos/", {"nome": "Engenharia Civil"})
@@ -195,3 +195,93 @@ class ApiTabelasAuxiliaresTeste(BaseTeste):
         dados = resposta.json()
         self.assertEqual(len(dados), 1)
         self.assertEqual(dados[0]["departamento_sigla"], "PMR")
+        
+    def test_lista_do_admin_mostra_curso_criado_depois(self):
+        self.client.force_login(self.admin)
+        self.assertEqual(len(self.client.get("/api/cursos/").json()), 2)
+        Curso.objects.create(nome="Engenharia Naval")
+        self.assertEqual(len(self.client.get("/api/cursos/").json()), 3)
+
+
+
+class ApiAutenticacaoTeste(BaseTeste):
+    SENHA = "Poli-2026-segura"
+
+    def dados_aluno(self, **extra):
+        dados = {
+            "nome": "Ana Souza", "email": "ana@usp.br", "senha": self.SENHA,
+            "numero_usp": "12345678", "curso": self.curso.pk, "ano_ingresso": 2024,
+        }
+        dados.update(extra)
+        return dados
+
+    def dados_docente(self, **extra):
+        dados = {
+            "nome": "Prof. Carlos", "email": "carlos@usp.br", "senha": self.SENHA,
+            "numero_usp": "87654321", "departamento": self.pmr.pk,
+        }
+        dados.update(extra)
+        return dados
+
+    def test_cadastro_de_aluno_devolve_token(self):
+        resposta = self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
+        self.assertEqual(resposta.status_code, 201)
+        corpo = resposta.json()
+        self.assertTrue(corpo["token"])
+        self.assertEqual(corpo["usuario"]["perfil"], "aluno")
+        self.assertEqual(corpo["usuario"]["aluno"]["ano_ingresso"], 2024)
+        aluno = Aluno.objects.get(numero_usp="12345678")
+        self.assertTrue(aluno.usuario.check_password(self.SENHA))
+
+    def test_cadastro_de_docente(self):
+        resposta = self.client.post("/api/auth/cadastro/docente/", self.dados_docente())
+        self.assertEqual(resposta.status_code, 201)
+        self.assertEqual(resposta.json()["usuario"]["docente"]["departamento"]["sigla"], "PMR")
+
+    def test_email_precisa_ser_usp(self):
+        resposta = self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno(email="ana@gmail.com"))
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("email", resposta.json())
+
+    def test_email_repetido_e_recusado_sem_criar_nada(self):
+        self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
+        resposta = self.client.post("/api/auth/cadastro/docente/", self.dados_docente(email="ANA@usp.br"))
+        self.assertEqual(resposta.status_code, 400)
+        self.assertEqual(Usuario.objects.count(), 1)
+
+    def test_senha_fraca_e_recusada(self):
+        resposta = self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno(senha="123"))
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("senha", resposta.json())
+        self.assertFalse(Usuario.objects.exists())
+
+    def test_ano_de_ingresso_no_futuro_e_recusado(self):
+        resposta = self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno(ano_ingresso=2999))
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_login_com_token_e_rota_eu(self):
+        self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
+        resposta = self.client.post("/api/auth/login/", {"email": "Ana@usp.br", "senha": self.SENHA})
+        self.assertEqual(resposta.status_code, 200)
+        token = resposta.json()["token"]
+        self.assertIsNotNone(Usuario.objects.get(email="ana@usp.br").last_login)
+        eu = self.client.get("/api/auth/eu/", HTTP_AUTHORIZATION=f"Token {token}")
+        self.assertEqual(eu.status_code, 200)
+        self.assertEqual(eu.json()["nome"], "Ana Souza")
+
+    def test_login_com_senha_errada(self):
+        self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
+        resposta = self.client.post("/api/auth/login/", {"email": "ana@usp.br", "senha": "errada"})
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_usuario_suspenso_nao_entra(self):
+        self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
+        Usuario.objects.filter(email="ana@usp.br").update(is_active=False)
+        resposta = self.client.post("/api/auth/login/", {"email": "ana@usp.br", "senha": self.SENHA})
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_logout_invalida_o_token(self):
+        cadastro = self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
+        cabecalho = {"HTTP_AUTHORIZATION": f"Token {cadastro.json()['token']}"}
+        self.assertEqual(self.client.post("/api/auth/logout/", **cabecalho).status_code, 204)
+        self.assertEqual(self.client.get("/api/auth/eu/", **cabecalho).status_code, 401)
