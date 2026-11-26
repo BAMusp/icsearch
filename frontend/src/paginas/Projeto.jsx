@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { useAuth } from "../auth.jsx";
 import { Aviso, Carregando, SeloStatus } from "../componentes/Basicos.jsx";
@@ -7,6 +7,7 @@ import { formatarData, useCarregar } from "../util.js";
 
 export default function Projeto() {
   const { id } = useParams();
+  const { hash } = useLocation();
   const { usuario } = useAuth();
   const ehAluno = usuario?.perfil === "aluno";
   const projeto = useCarregar(() => api(`/projetos/${id}/`), [id]);
@@ -14,6 +15,12 @@ export default function Projeto() {
     () => (ehAluno ? api("/manifestacoes/", { params: { projeto: id } }) : Promise.resolve([])),
     [id, ehAluno],
   );
+
+  useEffect(() => {
+    if (hash === "#oportunidades" && projeto.dados) {
+      document.getElementById("oportunidades")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [hash, projeto.dados]);
 
   if (projeto.carregando) return <Carregando />;
   if (projeto.erro) {
@@ -23,6 +30,7 @@ export default function Projeto() {
   const dados = projeto.dados;
   const ehDono = usuario?.perfil === "docente" && usuario.docente?.id_docente === dados.docente;
   const manifestacaoPorVaga = Object.fromEntries((minhas.dados || []).map((m) => [m.vaga, m]));
+  const abertas = dados.vagas.filter((vaga) => vaga.ativa).reduce((soma, vaga) => soma + vaga.vagas_abertas, 0);
 
   function registrarManifestacao(manifestacao) {
     minhas.setDados((atual) => [...(atual || []), manifestacao]);
@@ -38,6 +46,9 @@ export default function Projeto() {
             {dados.docente_nome} · {dados.departamento?.sigla} – {dados.departamento?.nome}
           </p>
         </div>
+        {!ehDono && abertas > 0 && (!usuario || ehAluno) && (
+          <a href="#oportunidades" className="botao">Manifestar interesse</a>
+        )}
         {ehDono && (
           <div className="acoes">
             <Link to={`/meus-projetos/${dados.id_projeto}`} className="botao botao-discreto">Editar</Link>
@@ -70,9 +81,17 @@ export default function Projeto() {
         <p className="texto-longo">{dados.resumo}</p>
       </section>
 
-      <section className="secao">
+      <section className="secao" id="oportunidades">
         <h2>Oportunidades</h2>
-        {dados.vagas.length === 0 && <p className="discreto">Este projeto ainda não tem vagas cadastradas.</p>}
+        {dados.vagas.length === 0 && (
+          <Aviso tipo="info">
+            {ehDono ? (
+              <>Este projeto ainda não tem vagas. <Link to={`/meus-projetos/${dados.id_projeto}`}>Abra uma vaga</Link> para receber interessados.</>
+            ) : (
+              <>O docente ainda não abriu vagas neste projeto, por isso não é possível manifestar interesse agora. Veja <Link to="/?vaga_aberta=1">projetos com vaga aberta</Link>.</>
+            )}
+          </Aviso>
+        )}
         {!usuario && dados.vagas.length > 0 && (
           <Aviso tipo="info">
             <Link to="/entrar" state={{ de: `/projetos/${id}` }}>Entre</Link> ou{" "}
