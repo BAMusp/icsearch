@@ -744,3 +744,35 @@ class DadosIniciaisTeste(TestCase):
         self.assertTrue(Usuario.objects.get(email="demo.ana@usp.br").check_password("Demo-2026-icsearch"))
         call_command("popular_demo", stdout=StringIO())
         self.assertEqual(Projeto.objects.count(), 5)
+
+
+
+class GarantirAdminTeste(TestCase):
+    def rodar(self, **variaveis):
+        from io import StringIO
+        from unittest import mock
+        from django.core.management import call_command
+        saida = StringIO()
+        with mock.patch.dict("os.environ", variaveis, clear=False):
+            call_command("garantir_admin", stdout=saida)
+        return saida.getvalue()
+
+    def test_cria_administrador(self):
+        self.rodar(DJANGO_SUPERUSER_EMAIL="Admin@Teste.com", DJANGO_SUPERUSER_PASSWORD="Senha-forte-1")
+        usuario = Usuario.objects.get(email="admin@teste.com")
+        self.assertTrue(usuario.is_superuser and usuario.is_staff)
+        self.assertTrue(usuario.check_password("Senha-forte-1"))
+
+    def test_atualiza_senha_de_quem_ja_existe(self):
+        Usuario.objects.create_user(email="admin@teste.com", nome="Admin", password="antiga")
+        saida = self.rodar(DJANGO_SUPERUSER_EMAIL="admin@teste.com", DJANGO_SUPERUSER_PASSWORD="Senha-nova-2")
+        self.assertIn("atualizado", saida)
+        usuario = Usuario.objects.get(email="admin@teste.com")
+        self.assertTrue(usuario.check_password("Senha-nova-2"))
+        self.assertTrue(usuario.is_superuser)
+        self.assertEqual(Usuario.objects.count(), 1)
+
+    def test_variaveis_vazias_nao_fazem_nada(self):
+        saida = self.rodar(DJANGO_SUPERUSER_EMAIL="", DJANGO_SUPERUSER_PASSWORD="")
+        self.assertIn("nao foi alterado", saida)
+        self.assertFalse(Usuario.objects.exists())
