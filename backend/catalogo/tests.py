@@ -31,10 +31,9 @@ class BaseTeste(TestCase):
         return Aluno.objects.create(usuario=usuario, curso=self.curso, numero_usp=nusp, ano_ingresso=2024)
 
     def criar_projeto(self, docente, **extra):
-        return Projeto.objects.create(
-            docente=docente, titulo="Robo autonomo", resumo="Navegacao",
-            data_inicio=date(2026, 3, 1), **extra,
-        )
+        dados = {"titulo": "Robo autonomo", "resumo": "Navegacao", "data_inicio": date(2026, 3, 1)}
+        dados.update(extra)
+        return Projeto.objects.create(docente=docente, **dados)
 
 
 class UsuarioTeste(BaseTeste):
@@ -423,3 +422,96 @@ class ApiProjetoVagaTeste(BaseTeste):
         with self.assertNumQueries(4):
             self.client.get("/api/projetos/")
         self.assertEqual(primeira[0]["vagas"][0]["vagas_abertas"], 2)
+
+
+
+class ApiBuscaTeste(BaseTeste):
+    def setUp(self):
+        self.docente_pmr = self.criar_docente("d1@usp.br", "10")
+        self.docente_pcs = self.criar_docente("d2@usp.br", "20")
+        self.docente_pcs.departamento = self.pcs
+        self.docente_pcs.save()
+        Usuario.objects.filter(pk=self.docente_pcs.usuario.pk).update(nome="Maria Conceição")
+        self.ia = GrandeArea.objects.create(nome="Inteligencia Artificial")
+        self.tcc = TipoOportunidade.objects.create(nome="TCC")
+        self.aluno = self.criar_aluno("a1@usp.br", "1")
+
+        self.robo = self.criar_projeto(self.docente_pmr, titulo="Robô de inspeção", resumo="Dutos")
+        self.robo.grandes_areas.add(self.robotica)
+        self.robo.palavras_chave.add(PalavraChave.objects.create(termo="Visão Computacional"))
+        Vaga.objects.create(projeto=self.robo, tipo_oportunidade=self.ic, quantidade=1, agencia_fomento=self.fapesp)
+
+        self.chatbot = self.criar_projeto(self.docente_pcs, titulo="Chatbot academico", resumo="Linguagem natural")
+        self.chatbot.grandes_areas.add(self.ia)
+        vaga_cheia = Vaga.objects.create(projeto=self.chatbot, tipo_oportunidade=self.tcc, quantidade=1)
+        ManifestacaoInteresse.objects.create(aluno=self.aluno, vaga=vaga_cheia, status="aceita")
+
+        self.inativo = self.criar_projeto(self.docente_pmr, titulo="Robo antigo", ativo=False)
+
+    def buscar(self, **params):
+        resposta = self.client.get("/api/busca/", params)
+        self.assertEqual(resposta.status_code, 200, resposta.content)
+        return sorted(p["titulo"] for p in resposta.json()["results"])
+
+    def test_sem_filtro_traz_todos_os_ativos(self):
+        self.assertEqual(self.buscar(), ["Chatbot academico", "Robô de inspeção"])
+
+    def test_filtro_por_grande_area(self):
+        self.assertEqual(self.buscar(grande_area=self.ia.pk), ["Chatbot academico"])
+
+    def test_filtro_por_departamento(self):
+        self.assertEqual(self.buscar(departamento=self.pmr.pk), ["Robô de inspeção"])
+
+    def test_filtro_por_tipo_de_oportunidade(self):
+        self.assertEqual(self.buscar(tipo_oportunidade=self.tcc.pk), ["Chatbot academico"])
+
+    def test_filtro_por_vaga_aberta(self):
+        self.assertEqual(self.buscar(vaga_aberta="1"), ["Robô de inspeção"])
+
+    def test_tipo_e_vaga_aberta_valem_para_a_mesma_vaga(self):
+        self.assertEqual(self.buscar(tipo_oportunidade=self.tcc.pk, vaga_aberta="1"), [])
+
+    def test_filtro_por_bolsa_e_por_agencia(self):
+        self.assertEqual(self.buscar(com_bolsa="1"), ["Robô de inspeção"])
+        self.assertEqual(self.buscar(agencia_fomento=self.fapesp.pk), ["Robô de inspeção"])
+
+    def test_busca_por_palavra_chave_ignora_acento_e_caixa(self):
+        self.assertEqual(self.buscar(q="VISAO"), ["Robô de inspeção"])
+        self.assertEqual(self.buscar(q="visão comp"), ["Robô de inspeção"])
+
+    def test_busca_por_titulo_resumo_e_docente(self):
+        self.assertEqual(self.buscar(q="inspeção"), ["Robô de inspeção"])
+        self.assertEqual(self.buscar(q="linguagem"), ["Chatbot academico"])
+        self.assertEqual(self.buscar(q="Conceição"), ["Chatbot academico"])
+
+    def test_todas_as_palavras_precisam_aparecer(self):
+        self.assertEqual(self.buscar(q="robô dutos"), ["Robô de inspeção"])
+        self.assertEqual(self.buscar(q="robô linguagem"), [])
+
+    def test_filtros_combinados(self):
+        self.assertEqual(self.buscar(q="robô", departamento=self.pcs.pk), [])
+        self.assertEqual(self.buscar(q="robô", departamento=self.pmr.pk, vaga_aberta="1"), ["Robô de inspeção"])
+
+    def test_projeto_inativo_nunca_aparece(self):
+        self.assertEqual(self.buscar(q="antigo"), [])
+
+    def test_resposta_paginada(self):
+        for i in range(12):
+            self.criar_projeto(self.docente_pmr, titulo=f"Extra {i}")
+        primeira = self.client.get("/api/busca/").json()
+        self.assertEqual(primeira["count"], 14)
+        self.assertEqual(len(primeira["results"]), 10)
+        self.assertIsNotNone(primeira["next"])
+        segunda = self.client.get("/api/busca/", {"page": 2}).json()
+        self.assertEqual(len(segunda["results"]), 4)
+
+    def test_filtro_invalido_responde_400(self):
+        resposta = self.client.get("/api/busca/", {"departamento": "abc"})
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_busca_nao_faz_uma_consulta_por_projeto(self):
+        for i in range(5):
+            projeto = self.criar_projeto(self.docente_pmr, titulo=f"Extra {i}")
+            Vaga.objects.create(projeto=projeto, tipo_oportunidade=self.ic, quantidade=1)
+        with self.assertNumQueries(5):
+            self.client.get("/api/busca/", {"q": "extra", "vaga_aberta": "1"})

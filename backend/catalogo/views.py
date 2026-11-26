@@ -1,14 +1,18 @@
 from django.contrib.auth.models import update_last_login
-from django.db.models import Prefetch, Q
+from django.db.models import Exists, F, OuterRef, Prefetch, Q
 from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
+from rest_framework.exceptions import ValidationError
+from rest_framework.generics import ListAPIView
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
     AgenciaFomento, Curso, Departamento, GrandeArea, Laboratorio, Projeto,
-    TipoOportunidade, Vaga,
+    ProjetoGrandeArea, ProjetoPalavraChave, TipoOportunidade, Vaga,
+    normalizar_termo,
 )
 from .permissions import (
     LeituraLivreEscritaAdmin, LeituraLivreEscritaDocenteDono, docente_do_usuario,
@@ -178,3 +182,87 @@ class VagaViewSet(DocenteDonoViewSet):
         if docente is not None:
             return queryset.filter(publicas | Q(projeto__docente=docente))
         return queryset.filter(publicas)
+
+
+
+class PaginacaoBusca(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "tamanho"
+    max_page_size = 50
+
+
+def parametro_inteiro(params, nome):
+    valor = params.get(nome)
+    if valor in (None, ""):
+        return None
+    try:
+        return int(valor)
+    except ValueError:
+        raise ValidationError({nome: "Informe um numero inteiro."})
+
+
+class BuscaView(ListAPIView):
+    serializer_class = ProjetoSerializer
+    permission_classes = [AllowAny]
+    pagination_class = PaginacaoBusca
+
+    def get_serializer_context(self):
+        contexto = super().get_serializer_context()
+        contexto["docente"] = docente_do_usuario(self.request.user)
+        return contexto
+
+    def get_queryset(self):
+        params = self.request.query_params
+        queryset = Projeto.objects.filter(ativo=True).select_related(
+            "docente__usuario", "docente__departamento", "laboratorio", "agencia_fomento",
+        ).prefetch_related(
+            "grandes_areas", "palavras_chave",
+            Prefetch("vagas", queryset=Vaga.objects.com_vagas_abertas().select_related(
+                "tipo_oportunidade", "agencia_fomento",
+            )),
+        )
+
+        grande_area = parametro_inteiro(params, "grande_area")
+        if grande_area is not None:
+            queryset = queryset.filter(
+                Exists(ProjetoGrandeArea.objects.filter(projeto=OuterRef("pk"), grande_area_id=grande_area))
+            )
+
+        departamento = parametro_inteiro(params, "departamento")
+        if departamento is not None:
+            queryset = queryset.filter(docente__departamento_id=departamento)
+
+        vagas = Vaga.objects.com_vagas_abertas().filter(projeto=OuterRef("pk"), ativa=True)
+        filtra_vagas = False
+        tipo = parametro_inteiro(params, "tipo_oportunidade")
+        if tipo is not None:
+            vagas = vagas.filter(tipo_oportunidade_id=tipo)
+            filtra_vagas = True
+        agencia = parametro_inteiro(params, "agencia_fomento")
+        if agencia is not None:
+            vagas = vagas.filter(agencia_fomento_id=agencia)
+            filtra_vagas = True
+        if params.get("com_bolsa") == "1":
+            vagas = vagas.filter(agencia_fomento__isnull=False)
+            filtra_vagas = True
+        if params.get("vaga_aberta") == "1":
+            vagas = vagas.filter(quantidade__gt=F("total_aceitas"))
+            filtra_vagas = True
+        if filtra_vagas:
+            queryset = queryset.filter(Exists(vagas))
+
+        for digitada in params.get("q", "").split():
+            normalizada = normalizar_termo(digitada)
+            condicao = Exists(ProjetoPalavraChave.objects.filter(
+                projeto=OuterRef("pk"),
+                palavra_chave__termo_normalizado__contains=normalizada,
+            ))
+            for forma in {digitada, normalizada}:
+                condicao |= (
+                    Q(titulo__icontains=forma)
+                    | Q(resumo__icontains=forma)
+                    | Q(docente__usuario__nome__icontains=forma)
+                )
+            queryset = queryset.filter(condicao)
+
+        return queryset.order_by("-data_cadastro", "-id_projeto")
