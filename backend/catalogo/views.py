@@ -1,6 +1,11 @@
+from datetime import date
+
 from django.contrib.auth.models import update_last_login
 from django.db import transaction
-from django.db.models import Exists, F, OuterRef, Prefetch, Q
+from django.db.models import (
+    Case, CharField, Count, Exists, F, OuterRef, Prefetch, Q, Value, When,
+)
+from django.db.models.functions import Cast, Concat, ExtractYear
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.authtoken.models import Token
@@ -8,7 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.generics import ListAPIView
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -341,3 +346,82 @@ class ManifestacaoViewSet(
     def recusar(self, request, pk=None):
         return self.responder(ManifestacaoInteresse.Status.RECUSADA)
 
+
+
+SEMESTRE = Concat(
+    Cast(ExtractYear("data_manifestacao"), CharField()),
+    Value("/"),
+    Case(When(data_manifestacao__month__lte=6, then=Value("1")), default=Value("2")),
+    output_field=CharField(),
+)
+
+DIMENSOES_PAINEL = {
+    "grande_area": ("Grande area", F("vaga__projeto__grandes_areas__nome"), "Sem area"),
+    "departamento": ("Departamento", F("vaga__projeto__docente__departamento__sigla"), "Sem departamento"),
+    "agencia_fomento": ("Agencia de fomento", F("vaga__agencia_fomento__sigla"), "Sem bolsa"),
+    "tipo_oportunidade": ("Tipo de oportunidade", F("vaga__tipo_oportunidade__nome"), "Sem tipo"),
+    "periodo": ("Periodo", SEMESTRE, "Sem periodo"),
+    "status": ("Status", F("status"), "Sem status"),
+}
+
+
+def data_do_parametro(params, nome):
+    valor = params.get(nome)
+    if not valor:
+        return None
+    try:
+        return date.fromisoformat(valor)
+    except ValueError:
+        raise ValidationError({nome: "Use o formato AAAA-MM-DD."})
+
+
+class PainelDemandaView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        params = request.query_params
+        linhas = params.get("linhas", "grande_area")
+        colunas = params.get("colunas", "periodo")
+        for nome, valor in (("linhas", linhas), ("colunas", colunas)):
+            if valor not in DIMENSOES_PAINEL:
+                raise ValidationError({nome: f"Use uma destas: {', '.join(DIMENSOES_PAINEL)}."})
+        if linhas == colunas:
+            raise ValidationError({"colunas": "Escolha uma dimensao diferente das linhas."})
+
+        manifestacoes = ManifestacaoInteresse.objects.all()
+        inicio = data_do_parametro(params, "de")
+        if inicio is not None:
+            manifestacoes = manifestacoes.filter(data_manifestacao__date__gte=inicio)
+        fim = data_do_parametro(params, "ate")
+        if fim is not None:
+            manifestacoes = manifestacoes.filter(data_manifestacao__date__lte=fim)
+
+        _, expr_linha, vazio_linha = DIMENSOES_PAINEL[linhas]
+        _, expr_coluna, vazio_coluna = DIMENSOES_PAINEL[colunas]
+        anotadas = manifestacoes.annotate(linha=expr_linha, coluna=expr_coluna)
+
+        def contar(*campos):
+            return anotadas.values(*campos).annotate(
+                total=Count("id_manifestacao", distinct=True),
+            ).order_by()
+
+        def rotulo(valor, vazio):
+            return vazio if valor is None else valor
+
+        celulas = {}
+        for item in contar("linha", "coluna"):
+            linha = rotulo(item["linha"], vazio_linha)
+            coluna = rotulo(item["coluna"], vazio_coluna)
+            celulas.setdefault(linha, {})[coluna] = item["total"]
+        total_linha = {rotulo(i["linha"], vazio_linha): i["total"] for i in contar("linha")}
+        total_coluna = {rotulo(i["coluna"], vazio_coluna): i["total"] for i in contar("coluna")}
+
+        return Response({
+            "linhas": {"dimensao": linhas, "titulo": DIMENSOES_PAINEL[linhas][0], "valores": sorted(total_linha)},
+            "colunas": {"dimensao": colunas, "titulo": DIMENSOES_PAINEL[colunas][0], "valores": sorted(total_coluna)},
+            "celulas": celulas,
+            "total_linha": total_linha,
+            "total_coluna": total_coluna,
+            "total_geral": manifestacoes.count(),
+            "dimensoes": {chave: valor[0] for chave, valor in DIMENSOES_PAINEL.items()},
+        })

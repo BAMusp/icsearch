@@ -638,3 +638,86 @@ class ApiManifestacaoTeste(BaseTeste):
         self.client.force_login(self.docente.usuario)
         with self.assertNumQueries(5):
             self.client.get("/api/manifestacoes/")
+
+
+
+class ApiPainelDemandaTeste(BaseTeste):
+    def setUp(self):
+        self.admin = Usuario.objects.create_superuser(email="admin@teste.com", nome="Admin", password="x")
+        docente_pmr = self.criar_docente("d1@usp.br", "10")
+        docente_pcs = self.criar_docente("d2@usp.br", "20")
+        docente_pcs.departamento = self.pcs
+        docente_pcs.save()
+        self.ia = GrandeArea.objects.create(nome="IA")
+
+        robo = self.criar_projeto(docente_pmr, titulo="Robo")
+        robo.grandes_areas.add(self.robotica)
+        chatbot = self.criar_projeto(docente_pcs, titulo="Chatbot")
+        chatbot.grandes_areas.add(self.ia)
+        hibrido = self.criar_projeto(docente_pcs, titulo="Robo conversador")
+        hibrido.grandes_areas.add(self.robotica, self.ia)
+
+        vaga_robo = Vaga.objects.create(projeto=robo, tipo_oportunidade=self.ic, quantidade=5, agencia_fomento=self.fapesp)
+        vaga_chatbot = Vaga.objects.create(projeto=chatbot, tipo_oportunidade=self.ic, quantidade=5)
+        vaga_hibrido = Vaga.objects.create(projeto=hibrido, tipo_oportunidade=self.ic, quantidade=5)
+
+        alunos = [self.criar_aluno(f"a{i}@usp.br", str(i)) for i in range(4)]
+        self.manifestar(alunos[0], vaga_robo, "2026-03-10")
+        self.manifestar(alunos[1], vaga_robo, "2026-08-20")
+        self.manifestar(alunos[2], vaga_chatbot, "2026-09-01")
+        self.manifestar(alunos[3], vaga_hibrido, "2026-02-01")
+
+    def manifestar(self, aluno, vaga, dia):
+        manifestacao = ManifestacaoInteresse.objects.create(aluno=aluno, vaga=vaga)
+        ManifestacaoInteresse.objects.filter(pk=manifestacao.pk).update(
+            data_manifestacao=f"{dia}T12:00:00-03:00",
+        )
+
+    def painel(self, **params):
+        self.client.force_login(self.admin)
+        resposta = self.client.get("/api/painel/demanda/", params)
+        self.assertEqual(resposta.status_code, 200, resposta.content)
+        return resposta.json()
+
+    def test_grande_area_por_semestre(self):
+        dados = self.painel()
+        self.assertEqual(dados["colunas"]["valores"], ["2026/1", "2026/2"])
+        self.assertEqual(dados["celulas"]["Robotica"], {"2026/1": 2, "2026/2": 1})
+        self.assertEqual(dados["celulas"]["IA"], {"2026/1": 1, "2026/2": 1})
+        self.assertEqual(dados["total_coluna"], {"2026/1": 2, "2026/2": 2})
+        self.assertEqual(dados["total_geral"], 4)
+
+    def test_projeto_com_duas_areas_conta_em_cada_linha_mas_uma_vez_no_total(self):
+        dados = self.painel()
+        self.assertEqual(dados["total_linha"], {"IA": 2, "Robotica": 3})
+        self.assertEqual(dados["total_geral"], 4)
+
+    def test_departamento_por_agencia_com_sem_bolsa(self):
+        dados = self.painel(linhas="departamento", colunas="agencia_fomento")
+        self.assertEqual(dados["celulas"], {
+            "PMR": {"FAPESP": 2},
+            "PCS": {"Sem bolsa": 2},
+        })
+        self.assertEqual(dados["total_coluna"], {"FAPESP": 2, "Sem bolsa": 2})
+
+    def test_painel_acompanha_o_docente_que_muda_de_departamento(self):
+        Docente.objects.filter(numero_usp="10").update(departamento=self.pcs)
+        dados = self.painel(linhas="departamento", colunas="status")
+        self.assertEqual(dados["total_linha"], {"PCS": 4})
+
+    def test_filtro_por_periodo(self):
+        dados = self.painel(de="2026-07-01", ate="2026-12-31")
+        self.assertEqual(dados["total_geral"], 2)
+        self.assertEqual(dados["colunas"]["valores"], ["2026/2"])
+
+    def test_so_administrador_acessa(self):
+        self.assertEqual(self.client.get("/api/painel/demanda/").status_code, 401)
+        self.client.force_login(Docente.objects.get(numero_usp="10").usuario)
+        self.assertEqual(self.client.get("/api/painel/demanda/").status_code, 403)
+
+    def test_parametros_invalidos(self):
+        self.client.force_login(self.admin)
+        url = "/api/painel/demanda/"
+        self.assertEqual(self.client.get(url, {"linhas": "cor"}).status_code, 400)
+        self.assertEqual(self.client.get(url, {"linhas": "periodo", "colunas": "periodo"}).status_code, 400)
+        self.assertEqual(self.client.get(url, {"de": "01/02/2026"}).status_code, 400)

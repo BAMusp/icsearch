@@ -21,4 +21,5 @@ urlpatterns = [
     path("auth/logout/", views.LogoutView.as_view(), name="logout"),
     path("auth/eu/", views.EuView.as_view(), name="eu"),
     path("busca/", views.BuscaView.as_view(), name="busca"),
+    path("painel/demanda/", views.PainelDemandaView.as_view(), name="painel-demanda"),
 ] + router.urls
