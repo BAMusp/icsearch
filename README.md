@@ -11,9 +11,11 @@ divulga seus projetos, define as vagas e seleciona os interessados.
 
 - **Back-end:** Python 3.11+, Django 5.2, Django REST Framework. SQLite no
   desenvolvimento, PostgreSQL em produção. Autenticação por token.
-- **Front-end:** React + Vite, consumindo a API por HTTP. Ainda por criar.
+- **Front-end:** React + Vite, consumindo a API por HTTP.
 
 ## Como rodar
+
+Back-end, em um terminal:
 
 ```bash
 cd backend
@@ -21,10 +23,36 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 python manage.py migrate
 python manage.py createsuperuser
+python manage.py popular_demo        # opcional: dados de exemplo
 python manage.py runserver
 ```
 
-Testes: `python manage.py test catalogo`
+Front-end, em outro terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Site em http://localhost:5173. Testes: `python manage.py test catalogo`
+
+O `migrate` já cadastra departamentos, cursos, grandes áreas, tipos de
+oportunidade e agências. O `popular_demo` cria docentes, alunos e projetos de
+exemplo; a senha de todos é `Demo-2026-icsearch`.
+
+## Deploy no Render
+
+O `render.yaml` cria o banco PostgreSQL, a API (`icsearch-api`) e o site
+(`icsearch`). No Render: **New → Blueprint**, escolha este repositório e
+preencha as variáveis pedidas:
+
+- `DJANGO_SUPERUSER_EMAIL` e `DJANGO_SUPERUSER_PASSWORD`: o administrador.
+- `CORS_ALLOWED_ORIGINS`: endereço do site, ex. `https://icsearch.onrender.com`.
+- `VITE_API_URL`: endereço da API, ex. `https://icsearch-api.onrender.com`.
+
+Se os endereços finais forem diferentes, corrija as duas últimas variáveis e
+faça um novo deploy dos dois serviços.
 
 **Chave primária com o nome do DER.** Cada modelo declara a sua
 (`id_projeto = models.AutoField(primary_key=True)`) em vez de usar o `id`
@@ -65,8 +93,8 @@ igual ao DER. Toda FK nova deve seguir isso.
 6. **Agência de fomento nula tem significado:** em projeto, pesquisa sem
    fomento; em vaga, oportunidade sem bolsa. Não existe um valor "Sem bolsa".
 
-- O caso de uso ALU001 não coleta `ano_ingresso` no formulário, mas o DOC004
-  exibe esse dado. O campo deve existir no modelo e entrar na tela.
+## Observação
+
 - O painel ADM003 deriva as dimensões ao vivo, então mover um docente de
   departamento reescreve totais históricos. Decisão consciente; se incomodar, a
   saída é gravar uma cópia das dimensões na manifestação.

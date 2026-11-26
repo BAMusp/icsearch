@@ -14,6 +14,8 @@ from .models import (
 class BaseTeste(TestCase):
     @classmethod
     def setUpTestData(cls):
+        for modelo in (Departamento, Curso, GrandeArea, TipoOportunidade, AgenciaFomento):
+            modelo.objects.all().delete()
         cls.pmr = Departamento.objects.create(sigla="PMR", nome="Engenharia Mecatronica")
         cls.pcs = Departamento.objects.create(sigla="PCS", nome="Engenharia de Computacao")
         cls.lab = Laboratorio.objects.create(departamento=cls.pmr, nome="Laboratorio de Robotica")
@@ -721,3 +723,24 @@ class ApiPainelDemandaTeste(BaseTeste):
         self.assertEqual(self.client.get(url, {"linhas": "cor"}).status_code, 400)
         self.assertEqual(self.client.get(url, {"linhas": "periodo", "colunas": "periodo"}).status_code, 400)
         self.assertEqual(self.client.get(url, {"de": "01/02/2026"}).status_code, 400)
+
+class DadosIniciaisTeste(TestCase):
+    def test_migracao_cria_os_valores_da_poli(self):
+        self.assertEqual(Departamento.objects.count(), 15)
+        self.assertTrue(Departamento.objects.filter(sigla="PMR").exists())
+        self.assertEqual(Curso.objects.count(), 11)
+        self.assertEqual(
+            sorted(GrandeArea.objects.values_list("nome", flat=True)),
+            ["Civil", "Elétrica", "Mecânica", "Química"],
+        )
+        self.assertTrue(AgenciaFomento.objects.filter(sigla="FAPESP").exists())
+
+    def test_popular_demo_cria_dados_e_nao_duplica(self):
+        from django.core.management import call_command
+        from io import StringIO
+        call_command("popular_demo", stdout=StringIO())
+        self.assertEqual(Projeto.objects.count(), 5)
+        self.assertEqual(ManifestacaoInteresse.objects.count(), 8)
+        self.assertTrue(Usuario.objects.get(email="demo.ana@usp.br").check_password("Demo-2026-icsearch"))
+        call_command("popular_demo", stdout=StringIO())
+        self.assertEqual(Projeto.objects.count(), 5)

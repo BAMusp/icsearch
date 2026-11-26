@@ -1,4 +1,5 @@
 const CHAVE_TOKEN = "icsearch_token";
+const ENDERECO_API = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 
 export function lerToken() {
   try {
@@ -51,7 +52,7 @@ export class ErroApi extends Error {
 }
 
 export async function api(caminho, { metodo = "GET", corpo, params } = {}) {
-  const url = new URL(`/api${caminho}`, window.location.origin);
+  const url = new URL(`${ENDERECO_API}/api${caminho}`, window.location.origin);
   Object.entries(params || {}).forEach(([nome, valor]) => {
     if (valor !== undefined && valor !== null && valor !== "") {
       url.searchParams.set(nome, valor);
