@@ -14,6 +14,13 @@ def docente_do_usuario(usuario):
     return getattr(usuario, "docente", None)
 
 
+
+def aluno_do_usuario(usuario):
+    if not usuario or not usuario.is_authenticated:
+        return None
+    return getattr(usuario, "aluno", None)
+
+
 class LeituraLivreEscritaDocenteDono(BasePermission):
     message = "Apenas o docente responsavel pode alterar este registro."
 

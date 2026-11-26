@@ -12,6 +12,7 @@ router.register("departamentos", views.DepartamentoViewSet)
 router.register("laboratorios", views.LaboratorioViewSet)
 router.register("projetos", views.ProjetoViewSet, basename="projeto")
 router.register("vagas", views.VagaViewSet, basename="vaga")
+router.register("manifestacoes", views.ManifestacaoViewSet, basename="manifestacao")
 
 urlpatterns = [
     path("auth/cadastro/aluno/", views.CadastroAlunoView.as_view(), name="cadastro-aluno"),

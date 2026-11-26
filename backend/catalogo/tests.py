@@ -515,3 +515,126 @@ class ApiBuscaTeste(BaseTeste):
             Vaga.objects.create(projeto=projeto, tipo_oportunidade=self.ic, quantidade=1)
         with self.assertNumQueries(5):
             self.client.get("/api/busca/", {"q": "extra", "vaga_aberta": "1"})
+
+
+
+class ApiManifestacaoTeste(BaseTeste):
+    def setUp(self):
+        self.docente = self.criar_docente("d1@usp.br", "10")
+        self.outro_docente = self.criar_docente("d2@usp.br", "20")
+        self.aluno = self.criar_aluno("a1@usp.br", "1")
+        self.outro_aluno = self.criar_aluno("a2@usp.br", "2")
+        self.projeto = self.criar_projeto(self.docente)
+        self.vaga = Vaga.objects.create(projeto=self.projeto, tipo_oportunidade=self.ic, quantidade=1)
+
+    def manifestar(self, aluno, vaga=None, **extra):
+        self.client.force_login(aluno.usuario)
+        dados = {"vaga": (vaga or self.vaga).pk, "mensagem": "Tenho interesse"}
+        dados.update(extra)
+        return self.client.post("/api/manifestacoes/", dados, content_type="application/json")
+
+    def responder(self, manifestacao_id, acao, docente=None):
+        self.client.force_login((docente or self.docente).usuario)
+        return self.client.post(f"/api/manifestacoes/{manifestacao_id}/{acao}/")
+
+    def test_aluno_manifesta_interesse(self):
+        resposta = self.manifestar(self.aluno)
+        self.assertEqual(resposta.status_code, 201, resposta.content)
+        dados = resposta.json()
+        self.assertEqual(dados["status"], "pendente")
+        self.assertEqual(dados["projeto_titulo"], "Robo autonomo")
+        self.assertEqual(ManifestacaoInteresse.objects.get().aluno, self.aluno)
+
+    def test_so_aluno_manifesta(self):
+        self.client.force_login(self.docente.usuario)
+        resposta = self.client.post("/api/manifestacoes/", {"vaga": self.vaga.pk}, content_type="application/json")
+        self.assertEqual(resposta.status_code, 403)
+        self.client.logout()
+        resposta = self.client.post("/api/manifestacoes/", {"vaga": self.vaga.pk}, content_type="application/json")
+        self.assertEqual(resposta.status_code, 401)
+
+    def test_manifestacao_repetida_e_recusada_com_mensagem(self):
+        self.manifestar(self.aluno)
+        resposta = self.manifestar(self.aluno)
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("vaga", resposta.json())
+
+    def test_vaga_inativa_ou_com_prazo_vencido_nao_recebe_manifestacao(self):
+        Vaga.objects.filter(pk=self.vaga.pk).update(ativa=False)
+        self.assertEqual(self.manifestar(self.aluno).status_code, 400)
+        Vaga.objects.filter(pk=self.vaga.pk).update(ativa=True, data_limite=date(2020, 1, 1))
+        self.assertEqual(self.manifestar(self.aluno).status_code, 400)
+
+    def test_vaga_preenchida_nao_recebe_manifestacao(self):
+        ManifestacaoInteresse.objects.create(aluno=self.outro_aluno, vaga=self.vaga, status="aceita")
+        resposta = self.manifestar(self.aluno)
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("preenchida", resposta.json()["vaga"][0])
+
+    def test_aluno_ve_so_as_proprias(self):
+        self.manifestar(self.aluno)
+        self.manifestar(self.outro_aluno)
+        self.client.force_login(self.aluno.usuario)
+        dados = self.client.get("/api/manifestacoes/").json()
+        self.assertEqual([m["aluno_nome"] for m in dados], [self.aluno.usuario.nome])
+
+    def test_docente_ve_as_das_suas_vagas_com_dados_do_aluno(self):
+        self.manifestar(self.aluno)
+        self.client.force_login(self.docente.usuario)
+        dados = self.client.get("/api/manifestacoes/", {"vaga": self.vaga.pk}).json()
+        self.assertEqual(len(dados), 1)
+        self.assertEqual(dados[0]["aluno_ano_ingresso"], 2024)
+        self.assertEqual(dados[0]["aluno_curso"], "Engenharia Mecatronica")
+        self.client.force_login(self.outro_docente.usuario)
+        self.assertEqual(self.client.get("/api/manifestacoes/").json(), [])
+
+    def test_docente_aceita_e_a_vaga_fecha(self):
+        manifestacao = self.manifestar(self.aluno).json()
+        resposta = self.responder(manifestacao["id_manifestacao"], "aceitar")
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(resposta.json()["status"], "aceita")
+        self.assertIsNotNone(resposta.json()["data_resposta"])
+        self.assertEqual(Vaga.objects.get(pk=self.vaga.pk).vagas_abertas, 0)
+
+    def test_nao_aceita_alem_da_quantidade(self):
+        primeira = self.manifestar(self.aluno).json()
+        segunda = self.manifestar(self.outro_aluno).json()
+        self.responder(primeira["id_manifestacao"], "aceitar")
+        resposta = self.responder(segunda["id_manifestacao"], "aceitar")
+        self.assertEqual(resposta.status_code, 400)
+        self.assertEqual(ManifestacaoInteresse.objects.get(pk=segunda["id_manifestacao"]).status, "pendente")
+
+    def test_docente_recusa(self):
+        manifestacao = self.manifestar(self.aluno).json()
+        resposta = self.responder(manifestacao["id_manifestacao"], "recusar")
+        self.assertEqual(resposta.json()["status"], "recusada")
+        self.assertEqual(Vaga.objects.get(pk=self.vaga.pk).vagas_abertas, 1)
+
+    def test_resposta_e_definitiva(self):
+        manifestacao = self.manifestar(self.aluno).json()
+        self.responder(manifestacao["id_manifestacao"], "recusar")
+        resposta = self.responder(manifestacao["id_manifestacao"], "aceitar")
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_so_o_docente_da_vaga_responde(self):
+        manifestacao = self.manifestar(self.aluno).json()
+        resposta = self.responder(manifestacao["id_manifestacao"], "aceitar", docente=self.outro_docente)
+        self.assertEqual(resposta.status_code, 404)
+        self.client.force_login(self.aluno.usuario)
+        resposta = self.client.post(f"/api/manifestacoes/{manifestacao['id_manifestacao']}/aceitar/")
+        self.assertEqual(resposta.status_code, 403)
+
+    def test_manifestacao_nao_se_apaga_nem_se_edita(self):
+        manifestacao = self.manifestar(self.aluno).json()
+        url = f"/api/manifestacoes/{manifestacao['id_manifestacao']}/"
+        self.assertEqual(self.client.delete(url).status_code, 405)
+        resposta = self.client.patch(url, {"status": "aceita"}, content_type="application/json")
+        self.assertEqual(resposta.status_code, 405)
+
+    def test_lista_do_docente_nao_faz_uma_consulta_por_manifestacao(self):
+        for i in range(5):
+            aluno = self.criar_aluno(f"x{i}@usp.br", f"9{i}")
+            ManifestacaoInteresse.objects.create(aluno=aluno, vaga=self.vaga)
+        self.client.force_login(self.docente.usuario)
+        with self.assertNumQueries(5):
+            self.client.get("/api/manifestacoes/")

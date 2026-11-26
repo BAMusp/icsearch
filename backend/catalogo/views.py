@@ -1,8 +1,11 @@
 from django.contrib.auth.models import update_last_login
+from django.db import transaction
 from django.db.models import Exists, F, OuterRef, Prefetch, Q
-from rest_framework import status, viewsets
+from django.utils import timezone
+from rest_framework import mixins, status, viewsets
 from rest_framework.authtoken.models import Token
-from rest_framework.exceptions import ValidationError
+from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.generics import ListAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -10,20 +13,21 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
-    AgenciaFomento, Curso, Departamento, GrandeArea, Laboratorio, Projeto,
-    ProjetoGrandeArea, ProjetoPalavraChave, TipoOportunidade, Vaga,
-    normalizar_termo,
+    AgenciaFomento, Curso, Departamento, GrandeArea, Laboratorio,
+    ManifestacaoInteresse, Projeto, ProjetoGrandeArea, ProjetoPalavraChave,
+    TipoOportunidade, Vaga, normalizar_termo,
 )
 from .permissions import (
-    LeituraLivreEscritaAdmin, LeituraLivreEscritaDocenteDono, docente_do_usuario,
+    LeituraLivreEscritaAdmin, LeituraLivreEscritaDocenteDono, aluno_do_usuario,
+    docente_do_usuario,
 )
 from .serializers import (
     AgenciaFomentoSerializer, CadastroAlunoSerializer, CadastroDocenteSerializer,
     CursoSerializer, DepartamentoSerializer, GrandeAreaSerializer,
-    LaboratorioSerializer, LoginSerializer, ProjetoSerializer,
-    TipoOportunidadeSerializer, UsuarioSerializer, VagaSerializer,
+    LaboratorioSerializer, LoginSerializer, ManifestacaoSerializer,
+    ProjetoSerializer, TipoOportunidadeSerializer, UsuarioSerializer,
+    VagaSerializer,
 )
-
 
 class TabelaAuxiliarViewSet(viewsets.ModelViewSet):
     permission_classes = [LeituraLivreEscritaAdmin]
@@ -266,3 +270,74 @@ class BuscaView(ListAPIView):
             queryset = queryset.filter(condicao)
 
         return queryset.order_by("-data_cadastro", "-id_projeto")
+
+
+
+class ManifestacaoViewSet(
+    mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    serializer_class = ManifestacaoSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = ManifestacaoInteresse.objects.select_related(
+            "aluno__usuario", "aluno__curso",
+            "vaga__projeto__docente__usuario", "vaga__tipo_oportunidade",
+        )
+        usuario = self.request.user
+        aluno = aluno_do_usuario(usuario)
+        docente = docente_do_usuario(usuario)
+        if aluno is not None:
+            queryset = queryset.filter(aluno=aluno)
+        elif docente is not None:
+            queryset = queryset.filter(vaga__projeto__docente=docente)
+        elif not usuario.is_staff:
+            return queryset.none()
+
+        params = self.request.query_params
+        vaga = parametro_inteiro(params, "vaga")
+        if vaga is not None:
+            queryset = queryset.filter(vaga_id=vaga)
+        projeto = parametro_inteiro(params, "projeto")
+        if projeto is not None:
+            queryset = queryset.filter(vaga__projeto_id=projeto)
+        if params.get("status"):
+            queryset = queryset.filter(status=params["status"])
+        return queryset
+
+    def get_serializer_context(self):
+        contexto = super().get_serializer_context()
+        contexto["aluno"] = aluno_do_usuario(self.request.user)
+        return contexto
+
+    def create(self, request, *args, **kwargs):
+        if aluno_do_usuario(request.user) is None:
+            raise PermissionDenied("Apenas alunos podem manifestar interesse.")
+        return super().create(request, *args, **kwargs)
+
+    def responder(self, novo_status):
+        manifestacao = self.get_object()
+        if manifestacao.vaga.projeto.docente != docente_do_usuario(self.request.user):
+            raise PermissionDenied("Apenas o docente responsavel pela vaga pode responder.")
+        with transaction.atomic():
+            vaga = Vaga.objects.select_for_update().get(pk=manifestacao.vaga_id)
+            manifestacao = ManifestacaoInteresse.objects.select_for_update().get(pk=manifestacao.pk)
+            if manifestacao.status != ManifestacaoInteresse.Status.PENDENTE:
+                raise ValidationError({"status": "Esta manifestacao ja foi respondida."})
+            if novo_status == ManifestacaoInteresse.Status.ACEITA and vaga.vagas_abertas <= 0:
+                raise ValidationError({"vaga": "Nao ha mais vagas abertas."})
+            manifestacao.status = novo_status
+            manifestacao.data_resposta = timezone.now()
+            manifestacao.save(update_fields=["status", "data_resposta"])
+        manifestacao = self.get_queryset().get(pk=manifestacao.pk)
+        return Response(self.get_serializer(manifestacao).data)
+
+    @action(detail=True, methods=["post"])
+    def aceitar(self, request, pk=None):
+        return self.responder(ManifestacaoInteresse.Status.ACEITA)
+
+    @action(detail=True, methods=["post"])
+    def recusar(self, request, pk=None):
+        return self.responder(ManifestacaoInteresse.Status.RECUSADA)
+

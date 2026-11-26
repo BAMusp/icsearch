@@ -7,8 +7,8 @@ from rest_framework import serializers
 
 from .models import (
     AgenciaFomento, Aluno, Curso, Departamento, Docente, GrandeArea,
-    Laboratorio, PalavraChave, Projeto, TipoOportunidade, Usuario, Vaga,
-    normalizar_termo,
+    Laboratorio, ManifestacaoInteresse, PalavraChave, Projeto,
+    TipoOportunidade, Usuario, Vaga, normalizar_termo,
 )
 
 
@@ -315,3 +315,42 @@ class ProjetoSerializer(serializers.ModelSerializer):
         projeto = super().update(projeto, dados)
         self.salvar_relacoes(projeto, areas, termos)
         return projeto
+
+
+
+class ManifestacaoSerializer(serializers.ModelSerializer):
+    aluno_nome = serializers.CharField(source="aluno.usuario.nome", read_only=True)
+    aluno_email = serializers.CharField(source="aluno.usuario.email", read_only=True)
+    aluno_numero_usp = serializers.CharField(source="aluno.numero_usp", read_only=True)
+    aluno_curso = serializers.CharField(source="aluno.curso.nome", read_only=True)
+    aluno_ano_ingresso = serializers.IntegerField(source="aluno.ano_ingresso", read_only=True)
+    projeto = serializers.IntegerField(source="vaga.projeto_id", read_only=True)
+    projeto_titulo = serializers.CharField(source="vaga.projeto.titulo", read_only=True)
+    docente_nome = serializers.CharField(source="vaga.projeto.docente.nome", read_only=True)
+    tipo_oportunidade_nome = serializers.CharField(source="vaga.tipo_oportunidade.nome", read_only=True)
+
+    class Meta:
+        model = ManifestacaoInteresse
+        fields = [
+            "id_manifestacao", "vaga", "mensagem", "status",
+            "data_manifestacao", "data_resposta",
+            "aluno_nome", "aluno_email", "aluno_numero_usp", "aluno_curso", "aluno_ano_ingresso",
+            "projeto", "projeto_titulo", "docente_nome", "tipo_oportunidade_nome",
+        ]
+        read_only_fields = ["status", "data_manifestacao", "data_resposta"]
+        validators = []
+
+    def validate_vaga(self, vaga):
+        if not vaga.ativa or not vaga.projeto.ativo:
+            raise serializers.ValidationError("Esta vaga nao esta mais disponivel.")
+        if vaga.data_limite is not None and vaga.data_limite < date.today():
+            raise serializers.ValidationError("O prazo desta vaga ja terminou.")
+        if vaga.vagas_abertas <= 0:
+            raise serializers.ValidationError("Esta vaga ja foi preenchida.")
+        aluno = self.context["aluno"]
+        if ManifestacaoInteresse.objects.filter(aluno=aluno, vaga=vaga).exists():
+            raise serializers.ValidationError("Voce ja manifestou interesse nesta vaga.")
+        return vaga
+
+    def create(self, dados):
+        return ManifestacaoInteresse.objects.create(aluno=self.context["aluno"], **dados)
