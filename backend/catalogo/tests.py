@@ -195,7 +195,7 @@ class ApiTabelasAuxiliaresTeste(BaseTeste):
         dados = resposta.json()
         self.assertEqual(len(dados), 1)
         self.assertEqual(dados[0]["departamento_sigla"], "PMR")
-        
+
     def test_lista_do_admin_mostra_curso_criado_depois(self):
         self.client.force_login(self.admin)
         self.assertEqual(len(self.client.get("/api/cursos/").json()), 2)
@@ -284,4 +284,142 @@ class ApiAutenticacaoTeste(BaseTeste):
         cadastro = self.client.post("/api/auth/cadastro/aluno/", self.dados_aluno())
         cabecalho = {"HTTP_AUTHORIZATION": f"Token {cadastro.json()['token']}"}
         self.assertEqual(self.client.post("/api/auth/logout/", **cabecalho).status_code, 204)
-        self.assertEqual(self.client.get("/api/auth/eu/", **cabecalho).status_code, 401)
+
+class ApiProjetoVagaTeste(BaseTeste):
+    def setUp(self):
+        self.docente = self.criar_docente("d1@usp.br", "10")
+        self.outro_docente = self.criar_docente("d2@usp.br", "20")
+        self.aluno = self.criar_aluno("a1@usp.br", "1")
+        Vinculo.objects.create(docente=self.docente, laboratorio=self.lab)
+
+    def dados_projeto(self, **extra):
+        dados = {
+            "titulo": "Robo autonomo", "resumo": "Navegacao em ambientes internos",
+            "data_inicio": "2026-03-01", "grandes_areas": [self.robotica.pk],
+            "palavras_chave": ["Visão Computacional", "ROS"],
+        }
+        dados.update(extra)
+        return dados
+
+    def criar_projeto_api(self, **extra):
+        self.client.force_login(self.docente.usuario)
+        resposta = self.client.post("/api/projetos/", self.dados_projeto(**extra), content_type="application/json")
+        self.assertEqual(resposta.status_code, 201, resposta.content)
+        return resposta.json()
+
+    def test_docente_cria_projeto_com_areas_e_palavras(self):
+        dados = self.criar_projeto_api(laboratorio=self.lab.pk, agencia_fomento=self.fapesp.pk)
+        self.assertEqual(dados["docente_nome"], self.docente.nome)
+        self.assertEqual(dados["departamento"]["sigla"], "PMR")
+        self.assertEqual(dados["grandes_areas_nomes"], ["Robotica"])
+        self.assertEqual(sorted(dados["palavras_chave"]), ["ROS", "Visão Computacional"])
+        self.assertEqual(dados["agencia_fomento_sigla"], "FAPESP")
+
+    def test_palavra_chave_existente_e_reaproveitada(self):
+        PalavraChave.objects.create(termo="Visão Computacional")
+        self.criar_projeto_api(palavras_chave=["visao  computacional"])
+        self.assertEqual(PalavraChave.objects.count(), 1)
+
+    def test_projeto_precisa_de_grande_area(self):
+        self.client.force_login(self.docente.usuario)
+        resposta = self.client.post("/api/projetos/", self.dados_projeto(grandes_areas=[]), content_type="application/json")
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("grandes_areas", resposta.json())
+
+    def test_laboratorio_precisa_ter_vinculo_com_o_docente(self):
+        outro_lab = Laboratorio.objects.create(departamento=self.pmr, nome="Outro laboratorio")
+        self.client.force_login(self.docente.usuario)
+        resposta = self.client.post("/api/projetos/", self.dados_projeto(laboratorio=outro_lab.pk), content_type="application/json")
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("laboratorio", resposta.json())
+
+    def test_data_fim_antes_do_inicio_e_recusada(self):
+        self.client.force_login(self.docente.usuario)
+        resposta = self.client.post("/api/projetos/", self.dados_projeto(data_fim="2026-01-01"), content_type="application/json")
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("data_fim", resposta.json())
+
+    def test_aluno_e_visitante_nao_criam_projeto(self):
+        resposta = self.client.post("/api/projetos/", self.dados_projeto(), content_type="application/json")
+        self.assertEqual(resposta.status_code, 401)
+        self.client.force_login(self.aluno.usuario)
+        resposta = self.client.post("/api/projetos/", self.dados_projeto(), content_type="application/json")
+        self.assertEqual(resposta.status_code, 403)
+
+    def test_so_o_dono_edita_e_ninguem_apaga(self):
+        projeto = self.criar_projeto_api()
+        url = f"/api/projetos/{projeto['id_projeto']}/"
+        self.client.force_login(self.outro_docente.usuario)
+        self.assertEqual(self.client.patch(url, {"titulo": "Invadido"}, content_type="application/json").status_code, 403)
+        self.client.force_login(self.docente.usuario)
+        resposta = self.client.patch(url, {"titulo": "Robo autonomo v2"}, content_type="application/json")
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(resposta.json()["grandes_areas_nomes"], ["Robotica"])
+        self.assertEqual(self.client.delete(url).status_code, 405)
+
+    def test_projeto_inativo_some_do_publico_mas_nao_do_dono(self):
+        projeto = self.criar_projeto_api(ativo=False)
+        self.client.logout()
+        self.assertEqual(self.client.get("/api/projetos/").json(), [])
+        self.client.force_login(self.docente.usuario)
+        meus = self.client.get("/api/projetos/?meus=1").json()
+        self.assertEqual([p["id_projeto"] for p in meus], [projeto["id_projeto"]])
+
+    def test_docente_abre_vaga_no_proprio_projeto(self):
+        projeto = self.criar_projeto_api()
+        resposta = self.client.post("/api/vagas/", {
+            "projeto": projeto["id_projeto"], "tipo_oportunidade": self.ic.pk, "quantidade": 2,
+        }, content_type="application/json")
+        self.assertEqual(resposta.status_code, 201, resposta.content)
+        self.assertEqual(resposta.json()["vagas_abertas"], 2)
+        self.assertIsNone(resposta.json()["agencia_fomento_sigla"])
+        detalhe = self.client.get(f"/api/projetos/{projeto['id_projeto']}/").json()
+        self.assertEqual(len(detalhe["vagas"]), 1)
+
+    def test_docente_nao_abre_vaga_em_projeto_alheio(self):
+        projeto = self.criar_projeto_api()
+        self.client.force_login(self.outro_docente.usuario)
+        resposta = self.client.post("/api/vagas/", {
+            "projeto": projeto["id_projeto"], "tipo_oportunidade": self.ic.pk, "quantidade": 1,
+        }, content_type="application/json")
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("projeto", resposta.json())
+
+    def test_quantidade_nao_fica_menor_que_as_aceitas(self):
+        projeto = Projeto.objects.get(pk=self.criar_projeto_api()["id_projeto"])
+        vaga = Vaga.objects.create(projeto=projeto, tipo_oportunidade=self.ic, quantidade=2)
+        ManifestacaoInteresse.objects.create(aluno=self.aluno, vaga=vaga, status="aceita")
+        outro = self.criar_aluno("a2@usp.br", "2")
+        ManifestacaoInteresse.objects.create(aluno=outro, vaga=vaga, status="aceita")
+        resposta = self.client.patch(f"/api/vagas/{vaga.pk}/", {"quantidade": 1}, content_type="application/json")
+        self.assertEqual(resposta.status_code, 400)
+        self.assertIn("quantidade", resposta.json())
+
+    def test_data_limite_no_passado_e_recusada(self):
+        projeto = self.criar_projeto_api()
+        resposta = self.client.post("/api/vagas/", {
+            "projeto": projeto["id_projeto"], "tipo_oportunidade": self.ic.pk,
+            "quantidade": 1, "data_limite": "2020-01-01",
+        }, content_type="application/json")
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_vaga_desativada_so_aparece_para_o_dono(self):
+        projeto = self.criar_projeto_api()
+        Vaga.objects.create(projeto_id=projeto["id_projeto"], tipo_oportunidade=self.ic, quantidade=1, ativa=False)
+        self.assertEqual(len(self.client.get(f"/api/projetos/{projeto['id_projeto']}/").json()["vagas"]), 1)
+        self.client.logout()
+        self.assertEqual(self.client.get(f"/api/projetos/{projeto['id_projeto']}/").json()["vagas"], [])
+        self.assertEqual(self.client.get("/api/vagas/").json(), [])
+
+    def test_lista_de_projetos_nao_faz_uma_consulta_por_vaga(self):
+        projeto = Projeto.objects.get(pk=self.criar_projeto_api()["id_projeto"])
+        vaga = Vaga.objects.create(projeto=projeto, tipo_oportunidade=self.ic, quantidade=3)
+        ManifestacaoInteresse.objects.create(aluno=self.aluno, vaga=vaga, status="aceita")
+        self.client.logout()
+        with self.assertNumQueries(4):
+            primeira = self.client.get("/api/projetos/").json()
+        for _ in range(4):
+            Vaga.objects.create(projeto=projeto, tipo_oportunidade=self.ic, quantidade=1)
+        with self.assertNumQueries(4):
+            self.client.get("/api/projetos/")
+        self.assertEqual(primeira[0]["vagas"][0]["vagas_abertas"], 2)

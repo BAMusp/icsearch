@@ -10,6 +10,8 @@ router.register("tipos-oportunidade", views.TipoOportunidadeViewSet)
 router.register("agencias-fomento", views.AgenciaFomentoViewSet)
 router.register("departamentos", views.DepartamentoViewSet)
 router.register("laboratorios", views.LaboratorioViewSet)
+router.register("projetos", views.ProjetoViewSet, basename="projeto")
+router.register("vagas", views.VagaViewSet, basename="vaga")
 
 urlpatterns = [
     path("auth/cadastro/aluno/", views.CadastroAlunoView.as_view(), name="cadastro-aluno"),

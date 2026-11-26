@@ -7,7 +7,8 @@ from rest_framework import serializers
 
 from .models import (
     AgenciaFomento, Aluno, Curso, Departamento, Docente, GrandeArea,
-    Laboratorio, TipoOportunidade, Usuario,
+    Laboratorio, PalavraChave, Projeto, TipoOportunidade, Usuario, Vaga,
+    normalizar_termo,
 )
 
 
@@ -175,3 +176,142 @@ class UsuarioSerializer(serializers.ModelSerializer):
         if hasattr(usuario, "docente"):
             return DocentePerfilSerializer(usuario.docente).data
         return None
+
+
+
+class VagaSerializer(serializers.ModelSerializer):
+    tipo_oportunidade_nome = serializers.CharField(source="tipo_oportunidade.nome", read_only=True)
+    agencia_fomento_sigla = serializers.CharField(source="agencia_fomento.sigla", read_only=True, default=None)
+    vagas_abertas = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Vaga
+        fields = [
+            "id_vaga", "projeto", "tipo_oportunidade", "tipo_oportunidade_nome",
+            "agencia_fomento", "agencia_fomento_sigla", "quantidade", "vagas_abertas",
+            "descricao", "data_limite", "ativa", "data_cadastro",
+        ]
+        read_only_fields = ["data_cadastro"]
+        extra_kwargs = {
+            "tipo_oportunidade": {"queryset": TipoOportunidade.objects.filter(ativo=True)},
+            "agencia_fomento": {"queryset": AgenciaFomento.objects.filter(ativo=True)},
+        }
+
+    def get_fields(self):
+        campos = super().get_fields()
+        docente = self.context.get("docente")
+        if docente is not None:
+            campos["projeto"].queryset = Projeto.objects.filter(docente=docente)
+        if self.instance is not None and not isinstance(self.instance, list):
+            campos["projeto"].read_only = True
+        return campos
+
+    def validate_quantidade(self, valor):
+        if valor < 1:
+            raise serializers.ValidationError("A quantidade deve ser pelo menos 1.")
+        if self.instance is not None:
+            aceitas = self.instance.quantidade - self.instance.vagas_abertas
+            if valor < aceitas:
+                raise serializers.ValidationError(
+                    f"Ja ha {aceitas} aluno(s) aceito(s); a quantidade nao pode ser menor."
+                )
+        return valor
+
+    def validate_data_limite(self, valor):
+        if valor is not None and valor < date.today():
+            raise serializers.ValidationError("A data limite nao pode estar no passado.")
+        return valor
+
+
+class ProjetoSerializer(serializers.ModelSerializer):
+    docente_nome = serializers.CharField(source="docente.nome", read_only=True)
+    departamento = DepartamentoSerializer(read_only=True)
+    laboratorio_nome = serializers.CharField(source="laboratorio.nome", read_only=True, default=None)
+    agencia_fomento_sigla = serializers.CharField(source="agencia_fomento.sigla", read_only=True, default=None)
+    grandes_areas = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=GrandeArea.objects.filter(ativo=True),
+    )
+    grandes_areas_nomes = serializers.SlugRelatedField(
+        source="grandes_areas", slug_field="nome", many=True, read_only=True,
+    )
+    palavras_chave = serializers.ListField(
+        child=serializers.CharField(max_length=80), required=False, write_only=True,
+    )
+    vagas = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Projeto
+        fields = [
+            "id_projeto", "titulo", "resumo", "data_inicio", "data_fim", "ativo",
+            "docente", "docente_nome", "departamento",
+            "laboratorio", "laboratorio_nome",
+            "agencia_fomento", "agencia_fomento_sigla",
+            "grandes_areas", "grandes_areas_nomes", "palavras_chave",
+            "vagas", "data_cadastro",
+        ]
+        read_only_fields = ["docente", "data_cadastro"]
+        extra_kwargs = {
+            "agencia_fomento": {"queryset": AgenciaFomento.objects.filter(ativo=True)},
+            "laboratorio": {"queryset": Laboratorio.objects.filter(ativo=True)},
+        }
+
+    def to_representation(self, projeto):
+        dados = super().to_representation(projeto)
+        dados["palavras_chave"] = [p.termo for p in projeto.palavras_chave.all()]
+        return dados
+
+    def get_vagas(self, projeto):
+        vagas = projeto.vagas.all()
+        if projeto.docente != self.context.get("docente"):
+            vagas = [vaga for vaga in vagas if vaga.ativa]
+        return VagaSerializer(vagas, many=True).data
+
+    def validate_grandes_areas(self, valor):
+        if not valor:
+            raise serializers.ValidationError("Informe pelo menos uma grande area.")
+        return valor
+
+    def validate(self, dados):
+        docente = self.context["docente"]
+        laboratorio = dados.get("laboratorio")
+        if laboratorio is not None and not docente.vinculos.filter(laboratorio=laboratorio).exists():
+            raise serializers.ValidationError(
+                {"laboratorio": "Voce nao tem vinculo com este laboratorio."}
+            )
+        inicio = dados.get("data_inicio", getattr(self.instance, "data_inicio", None))
+        fim = dados.get("data_fim", getattr(self.instance, "data_fim", None))
+        if inicio and fim and fim < inicio:
+            raise serializers.ValidationError(
+                {"data_fim": "A data de fim nao pode ser anterior a data de inicio."}
+            )
+        return dados
+
+    def salvar_relacoes(self, projeto, areas, termos):
+        if areas is not None:
+            projeto.grandes_areas.set(areas)
+        if termos is not None:
+            palavras = []
+            for termo in termos:
+                if not termo.strip():
+                    continue
+                palavra = PalavraChave.objects.filter(termo_normalizado=normalizar_termo(termo)).first()
+                if palavra is None:
+                    palavra = PalavraChave.objects.create(termo=termo)
+                palavras.append(palavra)
+            projeto.palavras_chave.set(palavras)
+
+    @transaction.atomic
+    def create(self, dados):
+        areas = dados.pop("grandes_areas")
+        termos = dados.pop("palavras_chave", [])
+        projeto = Projeto.objects.create(docente=self.context["docente"], **dados)
+        self.salvar_relacoes(projeto, areas, termos)
+        return projeto
+
+    @transaction.atomic
+    def update(self, projeto, dados):
+        areas = dados.pop("grandes_areas", None)
+        termos = dados.pop("palavras_chave", None)
+        projeto = super().update(projeto, dados)
+        self.salvar_relacoes(projeto, areas, termos)
+        return projeto

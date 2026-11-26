@@ -327,6 +327,13 @@ class ProjetoPalavraChave(models.Model):
     def __str__(self):
         return f"{self.projeto} - {self.palavra_chave}"
 
+class VagaQuerySet(models.QuerySet):
+    def com_vagas_abertas(self):
+        return self.annotate(
+            total_aceitas=models.Count(
+                "manifestacoes", filter=Q(manifestacoes__status="aceita"),
+            ),
+        )
 
 class Vaga(models.Model):
     id_vaga = models.AutoField(primary_key=True)
@@ -347,6 +354,7 @@ class Vaga(models.Model):
     data_limite = models.DateField(null=True, blank=True)
     ativa = models.BooleanField(default=True)
     data_cadastro = models.DateTimeField(auto_now_add=True)
+    objects = VagaQuerySet.as_manager()
 
     class Meta:
         db_table = "vaga"
@@ -363,7 +371,9 @@ class Vaga(models.Model):
 
     @property
     def vagas_abertas(self):
-        aceitas = self.manifestacoes.filter(status=ManifestacaoInteresse.Status.ACEITA).count()
+        aceitas = getattr(self, "total_aceitas", None)
+        if aceitas is None:
+            aceitas = self.manifestacoes.filter(status=ManifestacaoInteresse.Status.ACEITA).count()
         return max(self.quantidade - aceitas, 0)
 
 

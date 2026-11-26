@@ -1,4 +1,5 @@
 from django.contrib.auth.models import update_last_login
+from django.db.models import Prefetch, Q
 from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -6,15 +7,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
-    AgenciaFomento, Curso, Departamento, GrandeArea, Laboratorio,
-    TipoOportunidade,
+    AgenciaFomento, Curso, Departamento, GrandeArea, Laboratorio, Projeto,
+    TipoOportunidade, Vaga,
 )
-from .permissions import LeituraLivreEscritaAdmin
+from .permissions import (
+    LeituraLivreEscritaAdmin, LeituraLivreEscritaDocenteDono, docente_do_usuario,
+)
 from .serializers import (
     AgenciaFomentoSerializer, CadastroAlunoSerializer, CadastroDocenteSerializer,
     CursoSerializer, DepartamentoSerializer, GrandeAreaSerializer,
-    LaboratorioSerializer, LoginSerializer, TipoOportunidadeSerializer,
-    UsuarioSerializer,
+    LaboratorioSerializer, LoginSerializer, ProjetoSerializer,
+    TipoOportunidadeSerializer, UsuarioSerializer, VagaSerializer,
 )
 
 
@@ -119,3 +122,59 @@ class EuView(APIView):
 
     def get(self, request):
         return Response(UsuarioSerializer(request.user).data)
+
+
+
+class DocenteDonoViewSet(viewsets.ModelViewSet):
+    permission_classes = [LeituraLivreEscritaDocenteDono]
+    http_method_names = ["get", "post", "put", "patch", "head", "options"]
+
+    def get_serializer_context(self):
+        contexto = super().get_serializer_context()
+        contexto["docente"] = docente_do_usuario(self.request.user)
+        return contexto
+
+    def somente_meus(self):
+        return self.request.query_params.get("meus") == "1"
+
+
+class ProjetoViewSet(DocenteDonoViewSet):
+    serializer_class = ProjetoSerializer
+
+    def docente_dono(self, projeto):
+        return projeto.docente
+
+    def get_queryset(self):
+        queryset = Projeto.objects.select_related(
+            "docente__usuario", "docente__departamento", "laboratorio", "agencia_fomento",
+        ).prefetch_related(
+            "grandes_areas", "palavras_chave",
+            Prefetch("vagas", queryset=Vaga.objects.com_vagas_abertas().select_related(
+                "tipo_oportunidade", "agencia_fomento",
+            )),
+        )
+        docente = docente_do_usuario(self.request.user)
+        if self.somente_meus():
+            return queryset.filter(docente=docente) if docente else queryset.none()
+        if docente is not None:
+            return queryset.filter(Q(ativo=True) | Q(docente=docente))
+        return queryset.filter(ativo=True)
+
+
+class VagaViewSet(DocenteDonoViewSet):
+    serializer_class = VagaSerializer
+
+    def docente_dono(self, vaga):
+        return vaga.projeto.docente
+
+    def get_queryset(self):
+        queryset = Vaga.objects.com_vagas_abertas().select_related(
+            "projeto__docente", "tipo_oportunidade", "agencia_fomento",
+        )
+        docente = docente_do_usuario(self.request.user)
+        if self.somente_meus():
+            return queryset.filter(projeto__docente=docente) if docente else queryset.none()
+        publicas = Q(ativa=True, projeto__ativo=True)
+        if docente is not None:
+            return queryset.filter(publicas | Q(projeto__docente=docente))
+        return queryset.filter(publicas)
