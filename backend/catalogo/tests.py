@@ -151,3 +151,47 @@ class ManifestacaoTeste(BaseTeste):
         self.assertEqual(manifestacao.status, "pendente")
         with self.assertRaises(IntegrityError):
             ManifestacaoInteresse.objects.create(aluno=aluno, vaga=vaga)
+
+
+
+class ApiTabelasAuxiliaresTeste(BaseTeste):
+    def setUp(self):
+        self.admin = Usuario.objects.create_superuser(email="admin@teste.com", nome="Admin", password="x")
+        Curso.objects.create(nome="Curso Antigo", ativo=False)
+
+    def test_qualquer_pessoa_le_e_so_ve_os_ativos(self):
+        resposta = self.client.get("/api/cursos/")
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual([c["nome"] for c in resposta.json()], ["Engenharia Mecatronica"])
+
+    def test_admin_ve_tambem_os_inativos(self):
+        self.client.force_login(self.admin)
+        resposta = self.client.get("/api/cursos/")
+        self.assertEqual(len(resposta.json()), 2)
+
+    def test_so_admin_cria(self):
+        resposta = self.client.post("/api/cursos/", {"nome": "Engenharia Civil"})
+        self.assertEqual(resposta.status_code, 403)
+        aluno = self.criar_aluno("a1@usp.br", "1")
+        self.client.force_login(aluno.usuario)
+        resposta = self.client.post("/api/cursos/", {"nome": "Engenharia Civil"})
+        self.assertEqual(resposta.status_code, 403)
+        self.client.force_login(self.admin)
+        resposta = self.client.post("/api/cursos/", {"nome": "Engenharia Civil"})
+        self.assertEqual(resposta.status_code, 201)
+
+    def test_nada_se_apaga_pela_api(self):
+        self.client.force_login(self.admin)
+        curso = Curso.objects.get(nome="Engenharia Mecatronica")
+        resposta = self.client.delete(f"/api/cursos/{curso.pk}/")
+        self.assertEqual(resposta.status_code, 405)
+        resposta = self.client.patch(f"/api/cursos/{curso.pk}/", {"ativo": False}, content_type="application/json")
+        self.assertEqual(resposta.status_code, 200)
+        self.assertFalse(Curso.objects.get(pk=curso.pk).ativo)
+
+    def test_laboratorios_filtrados_por_departamento(self):
+        Laboratorio.objects.create(departamento=self.pcs, nome="Laboratorio de Software")
+        resposta = self.client.get(f"/api/laboratorios/?departamento={self.pmr.pk}")
+        dados = resposta.json()
+        self.assertEqual(len(dados), 1)
+        self.assertEqual(dados[0]["departamento_sigla"], "PMR")
